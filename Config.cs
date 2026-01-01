@@ -10,7 +10,7 @@ namespace RockRain;
 public class Config
 {
     private static Config? _instance;
-    private const string ConfigFileName = "RockRain.json";
+    private const string ConfigFileName = "巨石雨.json";
     private static string ConfigPath => Path.Combine(TShock.SavePath, ConfigFileName);
 
     /// <summary>

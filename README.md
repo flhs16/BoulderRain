@@ -16,11 +16,11 @@
 1. 确保已安装TShock服务器
 2. 将`RockRain.dll`放入TShock的`ServerPlugins`目录
 3. 启动服务器，插件会自动创建默认配置文件
-4. 根据需要修改配置文件`RockRain.json`
+4. 根据需要修改配置文件`巨石雨.json`
 
 ## 配置说明
 
-配置文件位于TShock目录下的`RockRain.json`，包含以下主要配置项：
+配置文件位于TShock目录下的`巨石雨.json`，包含以下主要配置项：
 
 ### 默认弹幕配置
 
