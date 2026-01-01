@@ -1,0 +1,22 @@
+# Visual Studio相关目录
+.vs/
+
+# 编译输出目录
+bin/
+obj/
+
+# IDE配置文件
+*.suo
+*.user
+*.sln.docstates
+
+# 临时文件
+*.tmp
+*.bak
+
+# 日志文件
+*.log
+
+# 操作系统文件
+Thumbs.db
+.DS_Store
