@@ -37,6 +37,12 @@ public class Config
     public int MaxEffects { get; set; } = 10;
 
     /// <summary>
+    /// 单个玩家可同时拥有的最大效果数量
+    /// </summary>
+    [JsonProperty("单个玩家最大生成数量")]
+    public int MaxEffectsPerPlayer { get; set; } = 3;
+
+    /// <summary>
     /// 玩家加入服务器时自动开启巨石雨效果
     /// </summary>
     [JsonProperty("玩家加入自动开启")]

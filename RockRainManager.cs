@@ -58,11 +58,17 @@ namespace RockRain;
             int currentTime = (int)Terraria.Main.GameUpdateCount;
             ProjectileData config = ProjectileData;
             
-            if (currentTime - LastSpawnTime < config.SpawnInterval)
+            // 基于服务器负载的动态生成限制
+            float averageFrameTime = RockRainManager.GetAverageFrameTime();
+            float loadFactor = Math.Min(averageFrameTime / 0.016f, 3f); // 16ms是60fps的目标帧时间，最高负载因子为3
+            
+            // 根据负载动态调整生成间隔
+            int adjustedInterval = (int)(config.SpawnInterval * loadFactor);
+            if (currentTime - LastSpawnTime < adjustedInterval)
                 return;
-
+                
             LastSpawnTime = currentTime;
-
+            
             // 计算生成位置
             Vector2 playerPos = Owner.TPlayer.Center;
             float halfWidth = config.Width / 2;
@@ -84,7 +90,7 @@ namespace RockRain;
             // 敌对弹幕：对玩家造成伤害，不伤害怪物
             int projIndex;
             
-            // 创建弹幕，使用系统索引0（敌对弹幕，对怪物造成伤害）
+            // 创建弹幕，使用玩家的索引作为所有者
             projIndex = Projectile.NewProjectile(
                 entitySource,
                 spawnPos.X,
@@ -94,7 +100,7 @@ namespace RockRain;
                 type,
                 damage,
                 knockback,
-                0
+                Owner.TPlayer.whoAmI
             );
 
             if (projIndex >= 0 && projIndex < Main.maxProjectiles)
@@ -122,14 +128,7 @@ namespace RockRain;
                 // 确保伤害值被正确设置
                 proj.damage = config.Damage;
                 
-                // 网络同步（多人游戏需要）
-                if (Main.netMode != 0)
-                {
-                    NetMessage.SendData(27, -1, -1, null, projIndex);
-                }
-                
-                // 向所有玩家发送弹幕创建数据包
-                TSPlayer.All.SendData(PacketTypes.ProjectileNew, "", projIndex);
+                // 服务器会自动同步Projectile.NewProjectile创建的弹幕，无需额外同步
             }
         }
     }
@@ -145,6 +144,12 @@ public static class RockRainManager
     // 追踪弹幕管理
     private static readonly ConcurrentDictionary<string, Projectile> _trackingProjectiles = new ConcurrentDictionary<string, Projectile>();
     
+    // 服务器负载监控
+    private static Queue<float> _frameTimeHistory = new Queue<float>();
+    private static readonly int MaxFrameTimeHistory = 30; // 保存30帧的历史
+    private static float _lastUpdateTime = 0;
+    private static float _currentFrameTime = 0;
+    
     /// <summary>
     /// 添加追踪弹幕
     /// </summary>
@@ -153,6 +158,24 @@ public static class RockRainManager
     public static void AddTrackingProjectile(string trackingId, Projectile projectile)
     {
         _trackingProjectiles.TryAdd(trackingId, projectile);
+    }
+    
+    /// <summary>
+    /// 获取平均帧时间（用于负载监控）
+    /// </summary>
+    /// <returns>平均帧时间（秒）</returns>
+    public static float GetAverageFrameTime()
+    {
+        if (_frameTimeHistory.Count == 0)
+            return 0.016f; // 默认16ms（60fps）
+            
+        float sum = 0;
+        foreach (float frameTime in _frameTimeHistory)
+        {
+            sum += frameTime;
+        }
+        
+        return sum / _frameTimeHistory.Count;
     }
 
     /// <summary>
@@ -214,6 +237,18 @@ public static class RockRainManager
     /// </summary>
     public static void Update()
     {
+        // 计算当前帧时间（用于负载监控）
+        float currentTime = (float)System.Environment.TickCount / 1000f;
+        _currentFrameTime = currentTime - _lastUpdateTime;
+        _lastUpdateTime = currentTime;
+        
+        // 维护帧时间历史
+        _frameTimeHistory.Enqueue(_currentFrameTime);
+        if (_frameTimeHistory.Count > MaxFrameTimeHistory)
+        {
+            _frameTimeHistory.Dequeue();
+        }
+        
         // 移除无效效果
         _activeEffects.RemoveAll(effect => !effect.IsActive);
 
@@ -238,54 +273,56 @@ public static class RockRainManager
             _trackingProjectiles.TryRemove(key, out _);
         }
         
-        // 追踪模式逻辑：始终执行，只要弹幕有追踪标识
-        for (int i = 0; i < Main.maxProjectiles; i++)
-        {
-            var projectile = Main.projectile[i];
+        // 优化：每2帧计算一次追踪，减少性能开销
+        if ((int)Terraria.Main.GameUpdateCount % 2 != 0)
+            return;
             
-            if (projectile.active && !string.IsNullOrEmpty(projectile.miscText) && _trackingProjectiles.ContainsKey(projectile.miscText))
+        // 追踪模式逻辑：只对活跃的追踪弹幕进行计算
+        foreach (var kvp in _trackingProjectiles)
+        {
+            string trackingId = kvp.Key;
+            var projectile = kvp.Value;
+            
+            if (!projectile.active || string.IsNullOrEmpty(projectile.miscText))
+                continue;
+                
+            // 从追踪标识中解析效果ID
+            string[] parts = projectile.miscText.Split('_');
+            if (parts.Length >= 5 && int.TryParse(parts[2], out int effectId))
             {
-                // 从追踪标识中解析效果ID
-                string[] parts = projectile.miscText.Split('_');
-                if (parts.Length >= 5 && int.TryParse(parts[2], out int effectId))
+                // 查找对应的效果实例
+                var effect = _activeEffects.FirstOrDefault(e => e.ID == effectId);
+                if (effect != null)
                 {
-                    // 查找对应的效果实例
-                    var effect = _activeEffects.FirstOrDefault(e => e.ID == effectId);
-                    if (effect != null)
+                    // 使用效果实例的追踪属性
+                    var config = effect.ProjectileData;
+                    
+                    // 查找最近的目标
+                    var targetPosition = FindNearestTarget(projectile.position, config.TrackingRange, config.TrackingTarget);
+                    
+                    if (targetPosition.HasValue)
                     {
-                        // 使用效果实例的追踪属性
-                        var config = effect.ProjectileData;
-                        
-                        // 查找最近的目标
-                        var targetPosition = FindNearestTarget(projectile.position, config.TrackingRange, config.TrackingTarget);
-                        
-                        if (targetPosition.HasValue)
+                        // 计算朝向目标的向量
+                        var direction = targetPosition.Value - projectile.Center;
+                        if (direction.Length() > 0)
                         {
-                            // 计算朝向目标的向量
-                            var direction = targetPosition.Value - projectile.Center;
-                            if (direction.Length() > 0)
+                            direction.Normalize();
+                            
+                            // 使用平滑转向，而不是直接设置速度
+                            // 计算目标速度
+                            var targetVelocity = direction * config.TrackingSpeed;
+                            
+                            // 平滑插值，使弹幕逐渐转向目标
+                            var smoothingFactor = 0.1f; // 转向平滑度，值越小转向越慢
+                            projectile.velocity.X = projectile.velocity.X * (1 - smoothingFactor) + targetVelocity.X * smoothingFactor;
+                            projectile.velocity.Y = projectile.velocity.Y * (1 - smoothingFactor) + targetVelocity.Y * smoothingFactor;
+                            
+                            // 限制最大速度
+                            var maxSpeed = config.TrackingSpeed * 1.5f; // 最大速度为追踪速度的1.5倍
+                            var currentSpeed = projectile.velocity.Length();
+                            if (currentSpeed > maxSpeed)
                             {
-                                direction.Normalize();
-                                
-                                // 使用平滑转向，而不是直接设置速度
-                                // 计算目标速度
-                                var targetVelocity = direction * config.TrackingSpeed;
-                                
-                                // 平滑插值，使弹幕逐渐转向目标
-                                var smoothingFactor = 0.1f; // 转向平滑度，值越小转向越慢
-                                projectile.velocity.X = projectile.velocity.X * (1 - smoothingFactor) + targetVelocity.X * smoothingFactor;
-                                projectile.velocity.Y = projectile.velocity.Y * (1 - smoothingFactor) + targetVelocity.Y * smoothingFactor;
-                                
-                                // 限制最大速度
-                                var maxSpeed = config.TrackingSpeed * 1.5f; // 最大速度为追踪速度的1.5倍
-                                var currentSpeed = projectile.velocity.Length();
-                                if (currentSpeed > maxSpeed)
-                                {
-                                    projectile.velocity = projectile.velocity / currentSpeed * maxSpeed;
-                                }
-                                
-                                // 更新弹幕位置信息
-                                NetMessage.SendData((int)PacketTypes.ProjectileNew, -1, -1, null, i);
+                                projectile.velocity = projectile.velocity / currentSpeed * maxSpeed;
                             }
                         }
                     }
@@ -305,10 +342,18 @@ public static class RockRainManager
         if (player == null || !player.TPlayer.active)
             return -1;
 
-        // 检查效果数量限制
+        // 检查全局效果数量限制
         if (_activeEffects.Count >= Config.Instance.MaxEffects)
         {
-            player.SendErrorMessage("[巨石雨] 达到最大生成数量限制");
+            player.SendErrorMessage("[巨石雨] 达到全局最大生成数量限制");
+            return -1;
+        }
+        
+        // 检查单个玩家效果数量限制
+        int playerEffectCount = _activeEffects.Count(effect => effect.Owner == player);
+        if (playerEffectCount >= Config.Instance.MaxEffectsPerPlayer)
+        {
+            player.SendErrorMessage("[巨石雨] 达到单个玩家最大效果数量限制");
             return -1;
         }
 
